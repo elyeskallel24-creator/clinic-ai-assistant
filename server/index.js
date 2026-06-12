@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs").promises;
-const path = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(cors());
@@ -9,7 +8,9 @@ app.use(express.json());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const API_URL = "https://openrouter.ai/api/v1/chat/completions";
-const LEADS_FILE = path.join(__dirname, "leads.json");
+
+const SUPABASE_URL = "https://bgldorxkmjmvjpgtniej.supabase.co";
+const supabase = createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 const MODELS = [
   "qwen/qwen3-next-80b-a3b-instruct:free",
@@ -111,25 +112,30 @@ Extrais les informations du lead au format JSON STRICT (aucun texte avant ou apr
 
     if (!lead.phone) return; // no phone, not a complete lead
 
-    lead.capturedAt = new Date().toISOString();
-
-    let leads = [];
-    try {
-      leads = JSON.parse(await fs.readFile(LEADS_FILE, "utf8"));
-    } catch {
-      // file doesn't exist yet — start fresh
-    }
-
-    // avoid duplicates: same phone already saved
+    // avoid duplicates: same phone already in the database
     const phoneKey = String(lead.phone).replace(/\D/g, "");
-    const exists = leads.some(
+    const { data: existing } = await supabase
+      .from("leads")
+      .select("id, phone");
+
+    const exists = (existing || []).some(
       (l) => String(l.phone).replace(/\D/g, "") === phoneKey
     );
     if (exists) return;
 
-    leads.push(lead);
-    await fs.writeFile(LEADS_FILE, JSON.stringify(leads, null, 2));
-    console.log("🎯 LEAD CAPTURED:", lead);
+    const { error } = await supabase.from("leads").insert({
+      name: lead.name,
+      phone: lead.phone,
+      treatment: lead.treatment,
+      language: lead.language,
+      score: lead.score,
+    });
+
+    if (error) {
+      console.error("Supabase insert error:", error.message);
+    } else {
+      console.log("🎯 LEAD SAVED TO DATABASE:", lead);
+    }
   } catch (err) {
     console.error("Lead extraction parse error:", raw?.slice(0, 200));
   }
@@ -160,8 +166,6 @@ app.post("/chat", async (req, res) => {
 
     res.json({ reply });
 
-    // After replying: if the latest visitor message contains a phone number,
-    // extract and save the lead in the background (doesn't slow the reply)
     const lastUserMsg = messages[messages.length - 1]?.text || "";
     if (looksLikePhone(lastUserMsg)) {
       extractAndSaveLead(messages.concat([{ role: "assistant", text: reply }]))
@@ -173,14 +177,15 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ---------- View captured leads (for now; dashboard comes later) ----------
+// ---------- View captured leads (temporary; dashboard comes later) ----------
 app.get("/leads", async (req, res) => {
-  try {
-    const leads = JSON.parse(await fs.readFile(LEADS_FILE, "utf8"));
-    res.json(leads);
-  } catch {
-    res.json([]);
-  }
+  const { data, error } = await supabase
+    .from("leads")
+    .select("*")
+    .order("captured_at", { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 app.get("/", (req, res) => res.json({ status: "ok", service: "clinic-ai-assistant" }));
