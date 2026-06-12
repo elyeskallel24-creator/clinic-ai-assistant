@@ -2,6 +2,8 @@
   // ---------- Prevent double-loading ----------
   if (window.__clinicWidgetLoaded) return;
   window.__clinicWidgetLoaded = true;
+  const SERVER_URL = "https://silver-lamp-7v6rg4q9w749cxrrx-3000.app.github.dev";
+  const history = []; // conversation memory: {role, text}
 
   // ---------- Styles ----------
   const style = document.createElement("style");
@@ -102,15 +104,36 @@
     input.focus();
   });
 
-  function handleSend() {
+  async function handleSend() {
     const text = input.value.trim();
     if (!text) return;
     addMessage(text, "user");
+    history.push({ role: "user", text: text });
     input.value = "";
-    // Temporary canned reply — the AI brain replaces this later
-    setTimeout(() => {
-      addMessage("Merci pour votre message ! (Réponse IA bientôt disponible 🤖)", "bot");
-    }, 600);
+
+    // typing indicator
+    const typing = document.createElement("div");
+    typing.className = "cw-msg bot";
+    typing.textContent = "...";
+    messages.appendChild(typing);
+    messages.scrollTop = messages.scrollHeight;
+
+    try {
+      const res = await fetch(SERVER_URL + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history }),
+      });
+      const data = await res.json();
+      typing.remove();
+
+      const reply = data.reply || "Désolé, une erreur s'est produite. Réessayez.";
+      addMessage(reply, "bot");
+      history.push({ role: "assistant", text: reply });
+    } catch (err) {
+      typing.remove();
+      addMessage("Connexion impossible. Veuillez réessayer.", "bot");
+    }
   }
 
   sendBtn.addEventListener("click", handleSend);
