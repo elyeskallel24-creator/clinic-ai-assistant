@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs").promises;
+const path = require("path");
 
 const app = express();
 app.use(cors());
@@ -7,6 +9,7 @@ app.use(express.json());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const API_URL = "https://openrouter.ai/api/v1/chat/completions";
+const LEADS_FILE = path.join(__dirname, "leads.json");
 
 const MODELS = [
   "qwen/qwen3-next-80b-a3b-instruct:free",
@@ -45,6 +48,94 @@ RÈGLES :
 - Si tu ne connais pas une information, dis-le honnêtement et propose d'appeler la clinique
 `;
 
+// ---------- Generic AI call with model failover ----------
+async function askAI(apiMessages, maxTokens) {
+  for (const model of MODELS) {
+    const aiRes = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + OPENROUTER_API_KEY,
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: apiMessages,
+        max_tokens: maxTokens,
+        temperature: 0.7,
+      }),
+    });
+
+    if (aiRes.ok) {
+      const data = await aiRes.json();
+      const content = data.choices?.[0]?.message?.content || null;
+      if (content) return content;
+    } else {
+      const errText = await aiRes.text();
+      console.error(`Model ${model} failed:`, errText.slice(0, 200));
+    }
+  }
+  return null;
+}
+
+// ---------- Lead extraction ----------
+function looksLikePhone(text) {
+  return /\d[\d\s.\-]{5,}\d/.test(text || "");
+}
+
+async function extractAndSaveLead(messages) {
+  const conversation = messages
+    .map((m) => `${m.role === "assistant" ? "Assistant" : "Visiteur"}: ${m.text}`)
+    .join("\n");
+
+  const extractionPrompt = `
+Voici une conversation entre l'assistant d'une clinique dentaire et un visiteur du site web.
+
+${conversation}
+
+Extrais les informations du lead au format JSON STRICT (aucun texte avant ou après, pas de markdown) :
+{
+  "name": "nom du visiteur ou null",
+  "phone": "numéro de téléphone ou null",
+  "treatment": "traitement qui l'intéresse ou null",
+  "language": "fr, ar ou en",
+  "score": un nombre de 1 à 10 évaluant la qualité du lead (10 = très intéressé, traitement cher, coordonnées complètes ; 1 = simple curiosité)
+}
+`;
+
+  const raw = await askAI([{ role: "user", content: extractionPrompt }], 200);
+  if (!raw) return;
+
+  try {
+    const cleaned = raw.replace(/```json|```/g, "").trim();
+    const lead = JSON.parse(cleaned);
+
+    if (!lead.phone) return; // no phone, not a complete lead
+
+    lead.capturedAt = new Date().toISOString();
+
+    let leads = [];
+    try {
+      leads = JSON.parse(await fs.readFile(LEADS_FILE, "utf8"));
+    } catch {
+      // file doesn't exist yet — start fresh
+    }
+
+    // avoid duplicates: same phone already saved
+    const phoneKey = String(lead.phone).replace(/\D/g, "");
+    const exists = leads.some(
+      (l) => String(l.phone).replace(/\D/g, "") === phoneKey
+    );
+    if (exists) return;
+
+    leads.push(lead);
+    await fs.writeFile(LEADS_FILE, JSON.stringify(leads, null, 2));
+    console.log("🎯 LEAD CAPTURED:", lead);
+  } catch (err) {
+    console.error("Lead extraction parse error:", raw?.slice(0, 200));
+  }
+}
+
+// ---------- The /chat endpoint ----------
 app.post("/chat", async (req, res) => {
   try {
     const { messages } = req.body;
@@ -61,41 +152,34 @@ app.post("/chat", async (req, res) => {
       })),
     ];
 
-    let reply = null;
-
-    for (const model of MODELS) {
-      const aiRes = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer " + OPENROUTER_API_KEY,
-        },
-        body: JSON.stringify({
-          model: model,
-          messages: apiMessages,
-          max_tokens: 300,
-          temperature: 0.7,
-        }),
-      });
-
-      if (aiRes.ok) {
-        const data = await aiRes.json();
-        reply = data.choices?.[0]?.message?.content || null;
-        if (reply) break;
-      } else {
-        const errText = await aiRes.text();
-        console.error(`Model ${model} failed:`, errText.slice(0, 200));
-      }
-    }
+    const reply = await askAI(apiMessages, 300);
 
     if (!reply) {
       return res.status(502).json({ error: "AI provider error" });
     }
 
     res.json({ reply });
+
+    // After replying: if the latest visitor message contains a phone number,
+    // extract and save the lead in the background (doesn't slow the reply)
+    const lastUserMsg = messages[messages.length - 1]?.text || "";
+    if (looksLikePhone(lastUserMsg)) {
+      extractAndSaveLead(messages.concat([{ role: "assistant", text: reply }]))
+        .catch((e) => console.error("Lead save error:", e));
+    }
   } catch (err) {
     console.error("Server error:", err);
     res.status(500).json({ error: "internal error" });
+  }
+});
+
+// ---------- View captured leads (for now; dashboard comes later) ----------
+app.get("/leads", async (req, res) => {
+  try {
+    const leads = JSON.parse(await fs.readFile(LEADS_FILE, "utf8"));
+    res.json(leads);
+  } catch {
+    res.json([]);
   }
 });
 
