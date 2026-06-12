@@ -7,13 +7,14 @@ app.use(express.json());
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const API_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 const MODELS = [
+  "qwen/qwen3-next-80b-a3b-instruct:free",
+  "openai/gpt-oss-120b:free",
+  "google/gemma-4-31b-it:free",
   "meta-llama/llama-3.3-70b-instruct:free",
-  "deepseek/deepseek-chat-v3-0324:free",
-  "mistralai/mistral-small-3.1-24b-instruct:free",
 ];
 
-// ---------- The assistant's personality & knowledge (v1: hardcoded) ----------
 const SYSTEM_PROMPT = `
 Tu es l'assistant virtuel de la Clinique BrightSmile, un cabinet dentaire moderne à Tunis.
 
@@ -37,10 +38,9 @@ RÈGLES :
 - Si tu ne connais pas une information, dis-le honnêtement et propose d'appeler la clinique
 `;
 
-// ---------- The /chat endpoint ----------
 app.post("/chat", async (req, res) => {
   try {
-    const { messages } = req.body; // [{role: "user"|"assistant", text: "..."}]
+    const { messages } = req.body;
 
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: "messages array required" });
@@ -74,11 +74,10 @@ app.post("/chat", async (req, res) => {
       if (aiRes.ok) {
         const data = await aiRes.json();
         reply = data.choices?.[0]?.message?.content || null;
-        if (reply) break; // success — stop trying models
+        if (reply) break;
       } else {
         const errText = await aiRes.text();
         console.error(`Model ${model} failed:`, errText.slice(0, 200));
-        // loop continues to the next model
       }
     }
 
@@ -87,26 +86,12 @@ app.post("/chat", async (req, res) => {
     }
 
     res.json({ reply });
-
-    if (!aiRes.ok) {
-      const errText = await aiRes.text();
-      console.error("AI provider error:", errText);
-      return res.status(502).json({ error: "AI provider error" });
-    }
-
-    const data = await aiRes.json();
-    const reply =
-      data.choices?.[0]?.message?.content ||
-      "Désolé, je n'ai pas pu générer de réponse. Veuillez réessayer.";
-
-    res.json({ reply });
   } catch (err) {
     console.error("Server error:", err);
     res.status(500).json({ error: "internal error" });
   }
 });
 
-// ---------- Health check ----------
 app.get("/", (req, res) => res.json({ status: "ok", service: "clinic-ai-assistant" }));
 
 const PORT = process.env.PORT || 3000;
